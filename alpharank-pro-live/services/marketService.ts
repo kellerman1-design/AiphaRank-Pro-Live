@@ -50,8 +50,16 @@ export interface MarketMacroData {
 }
 
 const calculateMarketInternals = async (spyHistory: StockCandle[]) => {
-    const sampleSize = 50; // Increased sample for better breadth accuracy
-    const sample = POPULAR_STOCKS.slice(0, sampleSize);
+    // Improved Sampling: Pick 100 stocks distributed evenly across the 1000 list
+    // to get a better market breadth representation than just the top 100.
+    const sampleSize = 100;
+    const step = Math.floor(POPULAR_STOCKS.length / sampleSize);
+    const sample = [];
+    for (let i = 0; i < sampleSize; i++) {
+        const index = Math.min(i * step, POPULAR_STOCKS.length - 1);
+        sample.push(POPULAR_STOCKS[index]);
+    }
+
     const results = await Promise.all(sample.map(async (s) => {
         try {
             const h = await fetchStockData(s.symbol);

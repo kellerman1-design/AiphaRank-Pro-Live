@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { X, BookOpen, Activity, Target, Zap, TrendingUp, BarChart2, ShieldAlert, Layers, Percent, ArrowUp, Microscope, Globe, Gauge, Compass, Landmark, LayoutGrid, Scale, ListChecks, Info, ChevronRight, DollarSign, Database, LineChart, CheckCircle } from 'lucide-react';
+import { X, BookOpen, Activity, Target, Zap, TrendingUp, BarChart2, ShieldAlert, Layers, Percent, ArrowUp, Microscope, Globe, Gauge, Compass, Landmark, LayoutGrid, Scale, ListChecks, Info, ChevronRight, DollarSign, Database, LineChart, CheckCircle, Menu } from 'lucide-react';
 
 interface Props {
   onClose: () => void;
@@ -8,6 +8,7 @@ interface Props {
 
 const UserGuide: React.FC<Props> = ({ onClose }) => {
   const [activeTab, setActiveTab] = useState<'basics' | 'macro' | 'prime' | 'indicators' | 'risk'>('basics');
+  const [showMobileMenu, setShowMobileMenu] = useState(false);
 
   const tabs = [
     { id: 'basics', label: 'System Basics', icon: BookOpen },
@@ -17,6 +18,11 @@ const UserGuide: React.FC<Props> = ({ onClose }) => {
     { id: 'risk', label: 'Risk Mgmt', icon: ShieldAlert },
   ];
 
+  const handleTabClick = (id: typeof activeTab) => {
+      setActiveTab(id);
+      setShowMobileMenu(false);
+  };
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={onClose} />
@@ -24,29 +30,34 @@ const UserGuide: React.FC<Props> = ({ onClose }) => {
       <div className="relative bg-gray-900 border border-gray-700 w-full max-w-5xl h-[85vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in zoom-in-95 duration-200">
         
         {/* Header */}
-        <div className="p-4 sm:p-6 border-b border-gray-800 flex justify-between items-center bg-gray-850">
+        <div className="p-4 sm:p-6 border-b border-gray-800 flex justify-between items-center bg-gray-850 shrink-0 z-30 relative">
           <div className="flex items-center gap-3">
-            <div className="bg-blue-600/20 p-2 rounded-lg">
-                <BookOpen className="text-blue-500" size={24} />
-            </div>
+            <button 
+                onClick={() => setShowMobileMenu(!showMobileMenu)}
+                className="bg-blue-600/20 p-2 rounded-lg text-blue-500 hover:bg-blue-600/30 transition-colors md:cursor-default cursor-pointer active:scale-95"
+            >
+                {showMobileMenu ? <X size={24} /> : <BookOpen size={24} />}
+            </button>
             <div>
-                <h2 className="text-lg sm:text-2xl font-bold text-white leading-tight">AlphaRank Pro Intelligence</h2>
-                <p className="text-xs text-gray-500 font-medium">Model Version 2.7.0 • Technical Protocol</p>
+                <h2 className="text-lg sm:text-2xl font-bold text-white leading-tight">AlphaRank Pro</h2>
+                <p className="text-xs text-gray-500 font-medium hidden sm:block">Model Version 2.7.0 • Technical Protocol</p>
+                <p className="text-xs text-gray-500 font-medium sm:hidden">Tap icon for menu</p>
             </div>
           </div>
-          <button onClose={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors text-gray-400 hover:text-white">
+          <button onClick={onClose} className="p-2 hover:bg-gray-800 rounded-full transition-colors text-gray-400 hover:text-white">
             <X size={24} />
           </button>
         </div>
 
         {/* Main Content Layout */}
-        <div className="flex flex-col md:flex-row flex-1 overflow-hidden">
+        <div className="flex flex-col md:flex-row flex-1 overflow-hidden relative">
             
+            {/* Desktop Sidebar */}
             <div className="w-64 bg-gray-850/50 border-r border-gray-800 hidden md:flex flex-col shrink-0">
                 {tabs.map(tab => (
                     <button
                         key={tab.id}
-                        onClick={() => setActiveTab(tab.id as any)}
+                        onClick={() => handleTabClick(tab.id as any)}
                         className={`p-4 flex items-center gap-3 text-sm font-medium transition-colors border-l-4 ${
                             activeTab === tab.id 
                             ? 'bg-blue-900/20 text-white border-blue-500' 
@@ -55,6 +66,26 @@ const UserGuide: React.FC<Props> = ({ onClose }) => {
                     >
                         <tab.icon size={18} />
                         {tab.label}
+                    </button>
+                ))}
+            </div>
+
+            {/* Mobile Sidebar (Overlay) */}
+            <div className={`absolute inset-0 z-20 bg-gray-900/95 backdrop-blur-xl transition-transform duration-300 md:hidden flex flex-col p-4 ${showMobileMenu ? 'translate-x-0' : '-translate-x-full'}`}>
+                <div className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-4 px-2">Navigate Guide</div>
+                {tabs.map(tab => (
+                    <button
+                        key={tab.id}
+                        onClick={() => handleTabClick(tab.id as any)}
+                        className={`p-4 flex items-center gap-4 text-base font-medium transition-all rounded-xl mb-2 ${
+                            activeTab === tab.id 
+                            ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40' 
+                            : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                        }`}
+                    >
+                        <tab.icon size={20} />
+                        {tab.label}
+                        {activeTab === tab.id && <ChevronRight className="ml-auto" size={16} />}
                     </button>
                 ))}
             </div>

@@ -195,7 +195,8 @@ export const fetchOfficialSMA = async (ticker: string, period: number = 150): Pr
     if (cached && (Date.now() - cached.timestamp < HISTORY_CACHE_DURATION)) return cached.data;
 
     try {
-        const url = `https://financialmodelingprep.com/stable/technical-indicator/sma?symbol=${ticker}&period=${period}&type=sma&apikey=${FMP_API_KEY}`;
+        // Updated URL per request to correct endpoint format
+        const url = `https://financialmodelingprep.com/stable/technical-indicators/sma?symbol=${ticker}&periodLength=${period}&timeframe=1day&apikey=${FMP_API_KEY}`;
         const val = await apiQueue.enqueue(async () => {
             const res = await fetch(url);
             if (!res.ok) return null;

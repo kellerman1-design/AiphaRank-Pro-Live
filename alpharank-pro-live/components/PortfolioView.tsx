@@ -1,12 +1,13 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Trash2, Save, RefreshCw, Briefcase, TrendingUp, TrendingDown, Target, ShieldAlert, ArrowRight, BookOpen, DollarSign, PiggyBank, Scale, X, Percent } from 'lucide-react';
+import { Plus, Trash2, Save, RefreshCw, Briefcase, TrendingUp, TrendingDown, Target, ShieldAlert, ArrowRight, BookOpen, DollarSign, PiggyBank, Scale, X, Percent, AlertCircle, Info } from 'lucide-react';
 import { userService } from '../services/userService';
 import { fetchStockData, fetchOfficialSMA, fetchMarketCap } from '../services/stockService';
 import { analyzeStock, generateTradeAdvice } from '../services/analysisEngine';
-import { Position, StockResult, TradeAdvice, RealizedTrade } from '../types';
+import { Position, StockResult, TradeAdvice, RealizedTrade, StockCandle } from '../types';
 
 const PORTFOLIO_CACHE_KEY = 'alpharank_portfolio_data';
+const TOTAL_VALUE_KEY = 'alpharank_last_total_value';
 
 interface Props {
   onSelectStock: (stock: StockResult) => void;
@@ -38,8 +39,13 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
   });
 
   const [loading, setLoading] = useState(false);
-  const [newTicker, setNewTicker] = useState('');
+  
+  // Add Position State
   const [isAdding, setIsAdding] = useState(false);
+  const [newTicker, setNewTicker] = useState('');
+  const [addPrice, setAddPrice] = useState('');
+  const [addQty, setAddQty] = useState('');
+
   const [expandedJournal, setExpandedJournal] = useState<string | null>(null);
 
   // Sell Modal State
@@ -47,6 +53,9 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
   const [sellingPosition, setSellingPosition] = useState<Position | null>(null);
   const [sellPrice, setSellPrice] = useState<string>('');
   const [sellQuantity, setSellQuantity] = useState<string>('');
+
+  // SPY History for Consistent Scoring
+  const [spyHistory, setSpyHistory] = useState<StockCandle[] | null>(null);
 
   // Initialize stats on mount
   useEffect(() => {
@@ -58,6 +67,8 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
       if (user?.realizedTrades) {
           setRealizedTrades(user.realizedTrades);
       }
+      // Fetch SPY for relative strength calculation consistency
+      fetchStockData('SPY').then(data => setSpyHistory(data)).catch(console.error);
   }, []);
 
   // Handle Portfolio Stats Update
@@ -86,6 +97,12 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
   const fetchPortfolioData = useCallback(async (forceRefresh = false) => {
     if (positions.length === 0) return;
     
+    // Ensure SPY history is available for accurate scoring
+    let currentSpy = spyHistory;
+    if (!currentSpy) {
+        try { currentSpy = await fetchStockData('SPY'); setSpyHistory(currentSpy); } catch(e) {}
+    }
+
     setLoading(true);
     const newData: Record<string, { result: StockResult, advice: TradeAdvice }> = {};
     let hasUpdates = false;
@@ -118,7 +135,10 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
         const history = await fetchStockData(pos.ticker);
         const sma = await fetchOfficialSMA(pos.ticker);
         const mCap = await fetchMarketCap(pos.ticker);
-        const result = analyzeStock(pos.ticker, history, sma, mCap);
+        
+        // Pass currentSpy to analyzeStock to ensure score matches Scanner/Detail view
+        const result = analyzeStock(pos.ticker, history, sma, mCap, currentSpy);
+        
         const advice = generateTradeAdvice(result, pos);
         
         newData[pos.ticker] = { result, advice };
@@ -138,13 +158,15 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
         setMarketData(prev => ({ ...prev, ...newData }));
     }
     setLoading(false);
-  }, [positions, marketData]); 
+  }, [positions, marketData, spyHistory]); 
 
-  // Force Refresh on Mount
+  // Force Refresh on Mount or when SPY is ready
   useEffect(() => {
-     fetchPortfolioData(true);
+     if (spyHistory) {
+         fetchPortfolioData(false);
+     }
      // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [spyHistory]);
 
   useEffect(() => {
       const updatedData = { ...marketData };
@@ -229,43 +251,89 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
   const handleAddPosition = async () => {
     if (!newTicker) return;
     const tickerUpper = newTicker.toUpperCase();
-    
-    if (positions.find(p => p.ticker === tickerUpper)) {
-        setNewTicker('');
-        setIsAdding(false);
+    const price = parseFloat(addPrice);
+    const qty = parseFloat(addQty);
+
+    if (isNaN(price) || isNaN(qty) || price < 0 || qty <= 0) {
+        alert("Please enter a valid price and quantity.");
         return;
     }
-
-    const newPos: Position = {
-        ticker: tickerUpper,
-        avgEntryPrice: 0,
-        quantity: 0,
-        entryDate: new Date().toISOString(),
-        notes: ''
-    };
-
-    const updated = [newPos, ...positions];
-    setPositions(updated);
-    userService.updatePosition(newPos);
     
-    setLoading(true);
-    try {
-        const history = await fetchStockData(tickerUpper);
-        const sma = await fetchOfficialSMA(tickerUpper);
-        const mCap = await fetchMarketCap(tickerUpper);
-        const result = analyzeStock(tickerUpper, history, sma, mCap);
-        const advice = generateTradeAdvice(result, newPos);
-        setMarketData(prev => ({ ...prev, [tickerUpper]: { result, advice } }));
-    } catch(e) {
-        console.error("Error fetching new ticker");
-    } finally {
-        setLoading(false);
-        setNewTicker('');
-        setIsAdding(false);
+    // Check if adding to existing or new
+    const existingPos = positions.find(p => p.ticker === tickerUpper);
+    const cost = price * qty;
+
+    if (cost > cashBalance) {
+        if (!confirm(`Warning: This purchase ($${cost.toLocaleString()}) exceeds your Cash Balance ($${cashBalance.toLocaleString()}). Proceed anyway (Negative Balance)?`)) {
+            return;
+        }
+    }
+
+    let newPos: Position;
+
+    if (existingPos) {
+        // Average down/up logic
+        const totalCost = (existingPos.avgEntryPrice * existingPos.quantity) + cost;
+        const totalQty = existingPos.quantity + qty;
+        newPos = {
+            ...existingPos,
+            avgEntryPrice: totalCost / totalQty,
+            quantity: totalQty
+        };
+        const updated = positions.map(p => p.ticker === tickerUpper ? newPos : p);
+        setPositions(updated);
+    } else {
+        newPos = {
+            ticker: tickerUpper,
+            avgEntryPrice: price,
+            quantity: qty,
+            entryDate: new Date().toISOString(),
+            notes: ''
+        };
+        const updated = [newPos, ...positions];
+        setPositions(updated);
+    }
+
+    // Deduct Cash ONLY. 
+    // Equity Invested (Net Deposits) should NOT change when swapping Cash for Stock.
+    const newCash = cashBalance - cost;
+    setCashBalance(newCash);
+    
+    // We do NOT update equityInvested here anymore.
+    // equityInvested represents total capital deposited into the account.
+
+    userService.updatePosition(newPos);
+    userService.updatePortfolioStats({ cashBalance: newCash, equityInvested: equityInvested });
+    
+    // Reset Add Form
+    setNewTicker('');
+    setAddPrice('');
+    setAddQty('');
+    setIsAdding(false);
+
+    // Fetch Data for new ticker
+    if (!marketData[tickerUpper]) {
+        setLoading(true);
+        try {
+            const history = await fetchStockData(tickerUpper);
+            const sma = await fetchOfficialSMA(tickerUpper);
+            const mCap = await fetchMarketCap(tickerUpper);
+            // Pass spyHistory here too
+            const result = analyzeStock(tickerUpper, history, sma, mCap, spyHistory);
+            const advice = generateTradeAdvice(result, newPos);
+            setMarketData(prev => ({ ...prev, [tickerUpper]: { result, advice } }));
+        } catch(e) {
+            console.error("Error fetching new ticker");
+        } finally {
+            setLoading(false);
+        }
     }
   };
 
   const handleUpdatePosition = (ticker: string, field: keyof Position, value: string | number) => {
+    // Note: Manual edits here DO NOT affect cash balance automatically, 
+    // as this is considered "Correction" mode. 
+    // Buys/Sells should go through the specific actions for cash tracking.
     const updatedPositions = positions.map(p => {
         if (p.ticker === ticker) {
             return { ...p, [field]: value };
@@ -299,6 +367,11 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
   const totalAccountValue = stocksValue + cashBalance;
   const totalNetReturn = totalAccountValue - equityInvested;
   const totalNetReturnPercent = equityInvested > 0 ? (totalNetReturn / equityInvested) * 100 : 0;
+
+  // Persist total value for the DetailView calculator
+  useEffect(() => {
+    localStorage.setItem(TOTAL_VALUE_KEY, totalAccountValue.toString());
+  }, [totalAccountValue]);
 
   // Tax Calculations
   const taxStats = useMemo(() => {
@@ -440,7 +513,7 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
           <h3 className="text-xl font-bold text-white">Holdings</h3>
           <button 
             onClick={() => setIsAdding(!isAdding)}
-            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg transition-colors font-semibold"
+            className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg transition-colors font-semibold shadow-lg shadow-blue-900/20"
           >
               <Plus size={18} /> Add Symbol
           </button>
@@ -448,19 +521,52 @@ const PortfolioView: React.FC<Props> = ({ onSelectStock }) => {
 
       {/* Add Row */}
       {isAdding && (
-          <div className="bg-gray-800/50 border border-blue-500/30 rounded-xl p-4 mb-6 flex items-center gap-4 animate-in fade-in zoom-in-95">
-              <input 
-                  autoFocus
-                  type="text"
-                  placeholder="Ticker (e.g. TSLA)"
-                  value={newTicker}
-                  onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
-                  onKeyDown={(e) => e.key === 'Enter' && handleAddPosition()}
-                  className="bg-gray-900 border border-gray-700 text-white px-4 py-2 rounded-lg uppercase font-mono w-40 focus:border-blue-500 outline-none"
-              />
-              <div className="flex gap-2">
-                <button onClick={handleAddPosition} className="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold">Save</button>
-                <button onClick={() => setIsAdding(false)} className="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+          <div className="bg-gray-800/50 border border-blue-500/30 rounded-xl p-4 mb-6 animate-in fade-in zoom-in-95">
+              <div className="flex flex-col md:flex-row items-end gap-4">
+                  <div className="flex-1 w-full">
+                      <label className="text-xs font-bold text-gray-500 mb-1 block uppercase">Ticker Symbol</label>
+                      <input 
+                          autoFocus
+                          type="text"
+                          placeholder="e.g. NVDA"
+                          value={newTicker}
+                          onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
+                          className="w-full bg-gray-900 border border-gray-700 text-white px-4 py-2 rounded-lg uppercase font-mono focus:border-blue-500 outline-none"
+                      />
+                  </div>
+                  <div className="w-full md:w-32">
+                      <label className="text-xs font-bold text-gray-500 mb-1 block uppercase">Entry Price</label>
+                      <div className="relative">
+                          <span className="absolute left-3 top-2 text-gray-500 text-xs">$</span>
+                          <input 
+                              type="number"
+                              placeholder="0.00"
+                              value={addPrice}
+                              onChange={(e) => setAddPrice(e.target.value)}
+                              className="w-full bg-gray-900 border border-gray-700 text-white pl-6 pr-3 py-2 rounded-lg font-mono focus:border-blue-500 outline-none"
+                          />
+                      </div>
+                  </div>
+                  <div className="w-full md:w-24">
+                      <label className="text-xs font-bold text-gray-500 mb-1 block uppercase">Qty</label>
+                      <input 
+                          type="number"
+                          placeholder="0"
+                          value={addQty}
+                          onChange={(e) => setAddQty(e.target.value)}
+                          className="w-full bg-gray-900 border border-gray-700 text-white px-3 py-2 rounded-lg font-mono focus:border-blue-500 outline-none"
+                      />
+                  </div>
+                  <div className="flex gap-2 w-full md:w-auto">
+                    <button onClick={handleAddPosition} className="flex-1 md:flex-none bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center justify-center gap-2">
+                        <Save size={16} /> Buy
+                    </button>
+                    <button onClick={() => setIsAdding(false)} className="flex-1 md:flex-none bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                  </div>
+              </div>
+              <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
+                  <Info size={12} />
+                  <span>Cost: <span className="text-white font-mono font-bold">${((parseFloat(addPrice) || 0) * (parseFloat(addQty) || 0)).toLocaleString()}</span> will be deducted from Cash Balance.</span>
               </div>
           </div>
       )}

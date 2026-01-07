@@ -1,5 +1,6 @@
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Search, BarChart2, RefreshCw, AlertCircle, TrendingUp, Info, ShieldAlert, Zap, Server, X, Check, Plus, Globe, User, Cloud, Bell, LogOut, Loader2, Target, Layers, List, Moon, Loader, Briefcase, PlayCircle, StopCircle, BookOpen, PieChart, Filter, Trophy, ArrowRight, Gauge, Activity, Menu, ChevronRight, LayoutGrid, Database, ArrowUpRight, Key, Copy } from 'lucide-react';
+import { Search, BarChart2, RefreshCw, AlertCircle, TrendingUp, Info, ShieldAlert, Zap, Server, X, Check, Plus, Globe, User, Cloud, Bell, LogOut, Loader2, Target, Layers, List, Moon, Loader, Briefcase, PlayCircle, StopCircle, BookOpen, PieChart, Filter, Trophy, ArrowRight, Gauge, Activity, Menu, ChevronRight, LayoutGrid, Database, ArrowUpRight, Key, Copy, Flame } from 'lucide-react';
 import { fetchStockData, fetchOfficialSMA, fetchMarketCap } from './services/stockService';
 import { analyzeStock } from './services/analysisEngine';
 import StockCard from './components/StockCard';
@@ -18,7 +19,7 @@ import { notificationService } from './services/notificationService';
 import { scannerService } from './services/scannerService';
 import { POPULAR_STOCKS } from './constants';
 
-const MAX_SELECTION = 10;
+const MAX_SELECTION = 30;
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'markets' | 'watchlist' | 'scanner' | 'sectors' | 'holdings'>('markets');
@@ -224,10 +225,45 @@ const App: React.FC = () => {
               if (filter === 'div') return stock.technicalData.rsiDivergence !== null;
               if (filter === 'nearHigh') return stock.currentPrice >= stock.technicalData.resistanceLevel * 0.95;
               if (filter === 'highVol') return (stock.technicalData.lastVolume / (stock.technicalData.volumeAvg20 || 1)) >= 1.5;
+              if (filter === 'instFlow') return (stock.technicalData.lastVolume / (stock.technicalData.volumeAvg20 || 1)) >= 1.2;
+              if (filter === 'surge') {
+                  // Check if score increased by 2.5 or more from the previous historical point
+                  const prevScore = stock.scoreHistory && stock.scoreHistory.length > 0 
+                      ? stock.scoreHistory[stock.scoreHistory.length - 1].score 
+                      : stock.totalScore;
+                  return (stock.totalScore - prevScore) >= 2.5;
+              }
               return true;
           });
       });
   }, [scannerResults, activeFilters]);
+
+  // Helper to fetch and add a card if missing
+  const fetchAndAddResult = async (ticker: string) => {
+      if (!isMountedRef.current) return;
+      // Check if already in results
+      if (results.find(r => r.ticker === ticker)) return;
+
+      try {
+          const history = await fetchStockData(ticker);
+          const sma = await fetchOfficialSMA(ticker);
+          const mCap = await fetchMarketCap(ticker);
+          let currentSpy = spyHistory;
+          if (!currentSpy) { try { currentSpy = await fetchStockData('SPY'); setSpyHistory(currentSpy); } catch(e) {} }
+          
+          const result = analyzeStock(ticker, history, sma, mCap, currentSpy);
+          if (result && isMountedRef.current) {
+              const staticInfo = POPULAR_STOCKS.find(s => s.symbol === ticker);
+              if (staticInfo) { result.companyName = staticInfo.name; result.sector = staticInfo.sector; }
+              setResults(prev => {
+                  if (prev.find(r => r.ticker === result.ticker)) return prev;
+                  return [...prev, result].sort((a, b) => b.totalScore - a.totalScore);
+              });
+          }
+      } catch (e) {
+          console.warn('Auto-fetch failed for watchlist item', ticker);
+      }
+  };
 
   const addTicker = (ticker: string) => {
     const upperTicker = ticker.toUpperCase().trim();
@@ -235,11 +271,15 @@ const App: React.FC = () => {
       setSelectedTickers(prev => [...prev, upperTicker]);
       setSearchQuery('');
       setIsDropdownOpen(false);
+      // Automatically fetch data so the card appears immediately
+      fetchAndAddResult(upperTicker);
     }
   };
 
   const removeTicker = (ticker: string) => {
     setSelectedTickers(prev => prev.filter(t => t !== ticker));
+    // Also remove from results to keep UI in sync
+    setResults(prev => prev.filter(r => r.ticker !== ticker));
   };
 
   const clearAllTickers = () => {
@@ -282,6 +322,58 @@ const App: React.FC = () => {
       if (exactMatch) addTicker(exactMatch.symbol);
       else if (searchQuery.trim().length > 0) addTicker(searchQuery);
     }
+  };
+
+  // --- NEW: Sync Detail View Updates Back to Lists ---
+  const handleStockUpdate = (updatedStock: StockResult) => {
+      // 1. Update Scanner Results
+      setScannerResults(prev => prev.map(s => {
+          if (s.ticker === updatedStock.ticker) {
+              return { 
+                  ...s, 
+                  totalScore: updatedStock.totalScore, 
+                  changePercent: updatedStock.changePercent,
+                  currentPrice: updatedStock.currentPrice,
+                  technicalData: updatedStock.technicalData,
+                  isPrimeSetup: updatedStock.isPrimeSetup,
+                  isTrendEntry: updatedStock.isTrendEntry
+              };
+          }
+          return s;
+      }));
+
+      // 2. Update Watchlist Results
+      setResults(prev => prev.map(s => {
+          if (s.ticker === updatedStock.ticker) {
+              return updatedStock;
+          }
+          return s;
+      }));
+  };
+
+  // Handle toggle from Detail View
+  // Now accepts optional stockData to immediately add card without refetch
+  const handleWatchlistToggle = (ticker: string, stockData?: StockResult) => {
+      const upperTicker = ticker.toUpperCase();
+      if (selectedTickers.includes(upperTicker)) {
+          removeTicker(upperTicker);
+      } else {
+          if (selectedTickers.length >= MAX_SELECTION) {
+              alert(`Watchlist limit reached (${MAX_SELECTION}). Remove a stock first.`);
+              return;
+          }
+          // If we have the stock data already (from Detail View), add directly to results
+          if (stockData) {
+              setResults(prev => {
+                  if (prev.find(r => r.ticker === stockData.ticker)) return prev;
+                  return [...prev, stockData].sort((a, b) => b.totalScore - a.totalScore);
+              });
+              setSelectedTickers(prev => [...prev, upperTicker]);
+          } else {
+              // Otherwise fetch it
+              addTicker(upperTicker);
+          }
+      }
   };
 
   const handleLogout = () => { userService.logout(); setUser(null); setSelectedTickers(['NVDA', 'MSFT', 'AAPL', 'TSLA', 'AMD']); setIsSidebarOpen(false); };
@@ -394,14 +486,15 @@ const App: React.FC = () => {
                                 <div className="w-full bg-gray-900/50 p-2 sm:p-0 rounded-2xl">
                                     <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-center sm:gap-2">
                                         <button onClick={() => toggleFilter('prime')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('prime') ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/50 shadow-yellow-900/20' : 'bg-gray-850 text-gray-400 hover:text-yellow-400 hover:bg-gray-800 border border-gray-700'}`}><Target size={14}/> Elite Prime</button>
+                                        <button onClick={() => toggleFilter('surge')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('surge') ? 'bg-red-500/20 text-red-400 border border-red-500/50 shadow-red-900/20' : 'bg-gray-850 text-gray-400 hover:text-red-400 hover:bg-gray-800 border border-gray-700'}`}><Flame size={14}/> Score Surge</button>
                                         <button onClick={() => toggleFilter('wkly')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('wkly') ? 'bg-blue-500/20 text-blue-400 border border-blue-500/50 shadow-blue-900/20' : 'bg-gray-850 text-gray-400 hover:text-blue-400 hover:bg-gray-800 border border-gray-700'}`}><Layers size={14}/> Wkly Synced</button>
                                         <button onClick={() => toggleFilter('trend')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('trend') ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/50 shadow-indigo-900/20' : 'bg-gray-850 text-gray-400 hover:text-indigo-400 hover:bg-gray-800 border border-gray-700'}`}><ArrowUpRight size={14}/> Trend Entry</button>
                                         <button onClick={() => toggleFilter('alpha')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('alpha') ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50 shadow-purple-900/20' : 'bg-gray-850 text-gray-400 hover:text-purple-400 hover:bg-gray-800 border border-gray-700'}`}><Trophy size={14}/> Alpha+</button>
                                         <button onClick={() => toggleFilter('leaders')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('leaders') ? 'bg-blue-500/20 text-blue-400 border border-blue-500/50 shadow-blue-900/20' : 'bg-gray-850 text-gray-400 hover:text-yellow-400 hover:bg-gray-800 border border-gray-700'}`}><TrendingUp size={14}/> Leaders</button>
+                                        <button onClick={() => toggleFilter('instFlow')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('instFlow') ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/50 shadow-emerald-900/20' : 'bg-gray-850 text-gray-400 hover:text-emerald-400 hover:bg-gray-800 border border-gray-700'}`}><Database size={14}/> Inst. Flow</button>
                                         <button onClick={() => toggleFilter('squeeze')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('squeeze') ? 'bg-orange-500/20 text-orange-400 border border-orange-500/50 shadow-orange-900/20' : 'bg-gray-850 text-gray-400 hover:text-orange-400 hover:bg-gray-800 border border-gray-700'}`}><Zap size={14}/> Squeezes</button>
                                         <button onClick={() => toggleFilter('div')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('div') ? 'bg-blue-600/20 text-blue-400 border border-blue-500/50 shadow-blue-900/20' : 'bg-gray-850 text-gray-400 hover:text-blue-400 hover:bg-gray-800 border border-gray-700'}`}><Activity size={14}/> DIV</button>
                                         <button onClick={() => toggleFilter('nearHigh')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('nearHigh') ? 'bg-green-500/20 text-green-400 border border-green-500/50 shadow-green-900/20' : 'bg-gray-850 text-gray-400 hover:text-green-400 hover:bg-gray-800 border border-gray-700'}`}><ArrowRight size={14}/> Highs</button>
-                                        <button onClick={() => toggleFilter('rising')} className={`w-full sm:w-auto px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md ${activeFilters.includes('rising') ? 'bg-purple-500/20 text-purple-400 border border-purple-500/50 shadow-purple-900/20' : 'bg-gray-850 text-gray-400 hover:text-purple-400 hover:bg-gray-800 border border-gray-700'}`}><TrendingUp size={14}/> Rising</button>
                                     </div>
                                 </div>
                                 <div className="text-[10px] text-gray-500 flex items-center gap-2 mt-1"><span>Select multiple filters to narrow results</span>{activeFilters.length > 0 && <span className="bg-blue-900/30 text-blue-400 px-2 rounded-full font-bold">{filteredScannerResults.length} Found</span>}</div>
@@ -456,7 +549,7 @@ const App: React.FC = () => {
                         {selectedTickers.length < MAX_SELECTION && selectedTickers.length > 0 && <div className="px-3 py-1.5 text-xs text-gray-500 border border-dashed border-gray-700 rounded-lg">Select up to {MAX_SELECTION - selectedTickers.length} more</div>}
                     </div>
                     <button onClick={handleAnalyze} disabled={loading || selectedTickers.length === 0} className={`w-full py-4 rounded-xl font-bold flex items-center justify-center gap-3 shadow-lg transition-all active:scale-95 ${loading ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-900/30'}`}>
-                        {loading ? (<><Loader2 className="animate-spin" size={24} /> <span>Running Multi-Factor Analysis...</span></>) : (<><Zap size={24} /> <span>Execute Alpha Analysis</span></>)}
+                        {loading ? (<><Loader2 className="animate-spin" size={24} /> <span>Running Multi-Factor Analysis...</span></>) : (<><Zap size={24} /> <span>Refresh Alpha Analysis</span></>)}
                     </button>
                 </div>
                 {error && (<div className="mb-8 p-4 bg-red-900/20 border border-red-500/30 rounded-xl flex items-center gap-3 text-red-400 animate-in slide-in-from-top-2"><AlertCircle size={20} /> <span className="text-sm font-medium">{error}</span></div>)}
@@ -466,7 +559,7 @@ const App: React.FC = () => {
             </div>
         ) : (<PortfolioView onSelectStock={setSelectedStock} />)}
       </main>
-      {selectedStock && <DetailView stock={selectedStock} onClose={handleCloseDetailView} />}
+      {selectedStock && <DetailView stock={selectedStock} onClose={handleCloseDetailView} onUpdate={handleStockUpdate} isWatched={selectedTickers.includes(selectedStock.ticker)} onWatchlistToggle={handleWatchlistToggle} />}
       {showAuthModal && <AuthModal onSuccess={handleAuthSuccess} onClose={() => setShowAuthModal(false)} />}
       {showAlertsList && <ActiveAlertsList onClose={() => setShowAlertsList(false)} />}
       {showGuide && <UserGuide onClose={() => setShowGuide(false)} />}

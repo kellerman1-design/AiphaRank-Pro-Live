@@ -67,6 +67,7 @@ export interface TechnicalAnalysis {
   isElliottImpulse: boolean;
   isDoubleBottom: boolean; 
   isInvHeadShoulders: boolean; 
+  isPocketPivot: boolean; // New Field
   fibLevel: number | null;
   weeklyTrend: 'BULLISH' | 'BEARISH' | 'NEUTRAL'; 
 }
@@ -102,6 +103,7 @@ export interface BacktestTrade {
   pnlPercent: number;
   reason: 'Target' | 'Stop' | 'Signal' | 'Open';
   type: 'Long';
+  signalType: 'PRIME' | 'TREND'; 
 }
 
 export interface BacktestResult {
@@ -118,10 +120,12 @@ export interface BacktestResult {
     equity: number; 
     bhEquity?: number; 
     isPrime?: boolean; 
-    isEntry?: boolean; 
+    isEntry?: boolean;
+    signalType?: 'PRIME' | 'TREND' | null; 
     isTrendEntry?: boolean; 
     entryReason?: string;
-    exitReason?: string; 
+    exitReason?: string;
+    status?: 'Long' | 'Cash'; 
   }[];
   currentStatus: 'Long' | 'Cash';
 }

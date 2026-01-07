@@ -269,10 +269,6 @@ const calculateInstantScore = (history: StockCandle[], spyHistory: StockCandle[]
     return Number(weighted.toFixed(1));
 };
 
-/**
- * ORIGINAL RESTORED: Precise Backtest Engine
- * Simulates portfolio growth based on realized P&L and technical triggers.
- */
 const calculateBacktest = (ticker: string, history: StockCandle[], spyHistory: StockCandle[] | null): BacktestResult => {
     const lookback = 252;
     const startIdx = Math.max(150, history.length - lookback);
@@ -289,43 +285,73 @@ const calculateBacktest = (ticker: string, history: StockCandle[], spyHistory: S
     for (let i = startIdx; i < history.length; i++) {
         const currentCandle = history[i];
         const histSlice = history.slice(0, i + 1);
+        const spySlice = spyHistory ? spyHistory.slice(0, i + 1) : null;
         
-        // Use the common scoring logic
-        const score = calculateInstantScore(histSlice, spyHistory ? spyHistory.slice(0, i + 1) : null);
+        const score = calculateInstantScore(histSlice, spySlice);
         const bollinger = calculateBollingerBands(histSlice);
+        const sma50 = calculateSMA(histSlice, 50);
+        const sma150 = calculateSMA(histSlice, 150);
         const atr = calculateATR(histSlice);
+        const rsiArr = calculateRSIHistory(histSlice, 14);
+        const rsi = rsiArr[rsiArr.length-1];
+
+        const volSma20 = calculateSMA(histSlice.map(c => ({...c, close: c.volume})), 20);
+        const rvol = currentCandle.volume / (volSma20 || 1);
+
+        const weeklyHistory = aggregateToWeekly(histSlice);
+        const wMA20 = calculateSMA(weeklyHistory, 20);
+        const weeklyTrend = (weeklyHistory.length > 0 && weeklyHistory[weeklyHistory.length-1].close > wMA20) ? 'BULLISH' : 'BEARISH';
+
+        let rsRatio = 1.0;
+        if (spySlice && spySlice.length > 100) {
+            const stockPerf = (currentCandle.close - histSlice[Math.max(0, histSlice.length-126)].close) / histSlice[Math.max(0, histSlice.length-126)].close;
+            const spyPerf = (spySlice[spySlice.length-1].close - spySlice[Math.max(0, spySlice.length-126)].close) / spySlice[Math.max(0, spySlice.length-126)].close;
+            rsRatio = (1 + stockPerf) / (1 + spyPerf);
+        }
         
         const priceDiffFromPivot = Math.abs(currentCandle.close - bollinger.middle) / (bollinger.middle || 1);
-        const isPrime = score >= 8.0 && priceDiffFromPivot <= 0.02;
-        const isTrend = score >= 7.0 && currentCandle.close > bollinger.middle && !isPrime;
+        
+        const isPrime = 
+            score >= 8.0 && 
+            priceDiffFromPivot <= 0.02 && 
+            weeklyTrend === 'BULLISH' && 
+            rvol >= 1.2 && 
+            rsRatio > 1.0;
 
-        // Buy & Hold Growth Tracking
+        const isTrend = 
+            score >= 7.0 && 
+            currentCandle.close > sma150 && 
+            weeklyTrend === 'BULLISH' && 
+            rsi > 55 && 
+            rvol > 1.2 && 
+            !isPrime;
+
         bhEquity = (currentCandle.close / firstClose) * initialEquity;
 
-        // Strategy Trade Management
         if (!activeTrade) {
             if (isPrime || isTrend) {
+                const signalType = isPrime ? 'PRIME' : 'TREND';
                 activeTrade = {
                     entryDate: currentCandle.date,
                     entryPrice: currentCandle.close,
-                    stopPrice: currentCandle.close - (2.2 * atr),
-                    targetPrice: currentCandle.close + (4.5 * atr),
+                    stopPrice: currentCandle.close - (2.2 * atr), 
+                    highestHigh: currentCandle.high,
                     isPrime: isPrime,
-                    units: equity / currentCandle.close // Full position size simulation
+                    signalType: signalType,
+                    units: equity / currentCandle.close 
                 };
             }
         } else {
-            // Check Exit Triggers
-            let exitReason: 'Stop' | 'Target' | 'Signal' | null = null;
-            if (currentCandle.low <= activeTrade.stopPrice) exitReason = 'Stop';
-            else if (currentCandle.high >= activeTrade.targetPrice) exitReason = 'Target';
-            else if (score < 4.5) exitReason = 'Signal';
+            let exitReason: 'Stop' | 'Signal' | null = null;
+            
+            if (currentCandle.low <= activeTrade.stopPrice) {
+                exitReason = 'Stop';
+            } else if (score < 4.0) { 
+                exitReason = 'Signal';
+            }
 
             if (exitReason) {
-                const exitPrice = exitReason === 'Stop' ? activeTrade.stopPrice : 
-                                 exitReason === 'Target' ? activeTrade.targetPrice : 
-                                 currentCandle.close;
-                
+                const exitPrice = exitReason === 'Stop' ? activeTrade.stopPrice : currentCandle.close;
                 const pnlFactor = (exitPrice / activeTrade.entryPrice);
                 equity *= pnlFactor;
                 if (pnlFactor > 1) wins++;
@@ -337,13 +363,22 @@ const calculateBacktest = (ticker: string, history: StockCandle[], spyHistory: S
                     exitPrice: exitPrice,
                     pnlPercent: (pnlFactor - 1) * 100,
                     reason: exitReason,
-                    type: 'Long'
+                    type: 'Long',
+                    signalType: activeTrade.signalType
                 });
                 activeTrade = null;
+            } else {
+                if (currentCandle.high > activeTrade.highestHigh) {
+                    activeTrade.highestHigh = currentCandle.high;
+                }
+                const trailingMultiple = 2.5; 
+                const potentialNewStop = currentCandle.close - (trailingMultiple * atr);
+                if (potentialNewStop > activeTrade.stopPrice) {
+                    activeTrade.stopPrice = potentialNewStop;
+                }
             }
         }
 
-        // Equity Curve includes unrealized floating value if in a trade
         const currentEquityValue = activeTrade ? (equity * (currentCandle.close / activeTrade.entryPrice)) : equity;
 
         equityCurve.push({
@@ -351,20 +386,22 @@ const calculateBacktest = (ticker: string, history: StockCandle[], spyHistory: S
             equity: Math.round(currentEquityValue),
             bhEquity: Math.round(bhEquity),
             isEntry: !!activeTrade && activeTrade.entryDate === currentCandle.date,
-            isPrime: !!activeTrade && activeTrade.isPrime,
-            entryReason: isPrime ? 'ELITE PRIME' : isTrend ? 'TREND ENTRY' : undefined
+            isPrime: isPrime,
+            signalType: isPrime ? 'PRIME' : isTrend ? 'TREND' : null, 
+            entryReason: isPrime ? 'ELITE PRIME' : isTrend ? 'TREND ENTRY' : undefined,
+            status: activeTrade ? 'Long' : 'Cash'
         });
     }
 
-    const buyHoldReturn = ((history[history.length - 1].close - firstClose) / firstClose) * 100;
-    const strategyReturn = ((equity - initialEquity) / initialEquity) * 100;
+    const finalEquity = equityCurve.length > 0 ? equityCurve[equityCurve.length - 1].equity : initialEquity;
+    const strategyReturn = ((finalEquity - initialEquity) / initialEquity) * 100;
 
     return {
         totalTrades: trades.length,
         winRate: trades.length > 0 ? (wins / trades.length) * 100 : 0,
         totalReturn: strategyReturn,
-        actualReturn: buyHoldReturn,
-        alphaReturn: strategyReturn - buyHoldReturn,
+        actualReturn: ((history[history.length - 1].close - firstClose) / firstClose) * 100,
+        alphaReturn: strategyReturn - ((history[history.length - 1].close - firstClose) / firstClose) * 100,
         maxDrawdown: 0,
         drawdownAvoided: 0,
         trades,
@@ -412,10 +449,25 @@ export const analyzeStock = (ticker: string, history: StockCandle[], officialSMA
     const rvol = lastVolume / (volAvg20 || 1);
     const { isCupHandle } = detectChartPatterns(history, currentPrice);
 
-    // Scoring
+    // Calculate Pocket Pivot
+    let isPocketPivot = false;
+    if (history.length >= 12 && currentPrice > history[history.length-1].open) {
+        const last10 = history.slice(history.length - 11, history.length - 1);
+        let maxDownVol10 = 0;
+        for(let i=0; i<last10.length; i++) {
+            const day = last10[i];
+            const prevDay = i===0 ? history[history.length - 12] : last10[i-1];
+            if (day.close < prevDay.close) {
+                if (day.volume > maxDownVol10) maxDownVol10 = day.volume;
+            }
+        }
+        if (lastVolume > maxDownVol10 && maxDownVol10 > 0) {
+            isPocketPivot = true;
+        }
+    }
+
     const finalScore = calculateInstantScore(history, spyHistory, officialSMA);
 
-    // EXPLICIT PRIME IDENTIFICATION
     const priceDiffFromPivot = Math.abs(currentPrice - bollinger.middle) / (bollinger.middle || 1);
     const isPrimeSetup = 
         finalScore >= 8.0 && 
@@ -424,7 +476,7 @@ export const analyzeStock = (ticker: string, history: StockCandle[], officialSMA
         rvol >= 1.2 && 
         rsRatio > 1.0;
 
-    const isTrendEntry = currentPrice > sma150 && weeklyTrend === 'BULLISH' && rsi > 55 && rvol > 1.2 && !isPrimeSetup;
+    const isTrendEntry = finalScore >= 7.0 && currentPrice > sma150 && weeklyTrend === 'BULLISH' && rsi > 55 && rvol > 1.2 && !isPrimeSetup;
 
     const indicators: IndicatorScore[] = [
         { name: 'RS vs Market', score: rsRatio > 1.05 ? 10 : (rsRatio > 1 ? 7 : 3), weight: 0.15, value: `${((rsRatio - 1) * 100).toFixed(1)}%`, description: rsRatio > 1 ? 'Outperforming Market' : 'Lagging S&P 500', bullishCriteria: rsRatio > 1, criteria: 'Relative Strength context.' },
@@ -451,13 +503,12 @@ export const analyzeStock = (ticker: string, history: StockCandle[], officialSMA
         }
     }
 
-    // ORIGINAL SIMULATION RESTORED
     const backtest = calculateBacktest(ticker, history, spyHistory);
 
     return {
         ticker, currentPrice, marketCap: marketCap || 0, changePercent: ((currentPrice - prevPrice) / prevPrice) * 100, totalScore: finalScore, recommendation: finalScore >= 8.5 ? Recommendation.STRONG_BUY : finalScore >= 6.5 ? Recommendation.BUY : finalScore >= 4.5 ? Recommendation.HOLD : Recommendation.SELL, indicators, 
         riskAnalysis: { stopLoss: bollinger.middle - (2.5 * atr), takeProfit: bollinger.middle + (5 * atr), entryPrice: bollinger.middle, entrySource: 'SMA 20 Mean Reversion Pivot', riskRewardRatio: 2.0, thesis: generateDynamicThesis(finalScore, rsRatio, weeklyTrend, rvol, isCupHandle, rsiDiv, squeezeOn), slSource: '2.5x ATR', tpSource: '5x ATR', targets: [] },
-        technicalData: { rsi, sma150, vwma, macd, adx: { adx: 25, pdi: 26, ndi: 18 }, bollinger, keltner, squeezeOn, rsiDivergence: rsiDiv, relativeStrength: rsRatio, sar: 0, atr, volumeAvg20: volAvg20, lastVolume: lastVolume, supportLevel: currentPrice - (2.5 * atr), resistanceLevel: currentPrice + (5 * atr), isCupHandle, isElliottImpulse: false, isDoubleBottom: false, isInvHeadShoulders: false, fibLevel: null, weeklyTrend },
+        technicalData: { rsi, sma150, vwma, macd, adx: { adx: 25, pdi: 26, ndi: 18 }, bollinger, keltner, squeezeOn, rsiDivergence: rsiDiv, relativeStrength: rsRatio, sar: 0, atr, volumeAvg20: volAvg20, lastVolume: lastVolume, supportLevel: currentPrice - (2.5 * atr), resistanceLevel: currentPrice + (5 * atr), isCupHandle, isElliottImpulse: false, isDoubleBottom: false, isInvHeadShoulders: false, isPocketPivot, fibLevel: null, weeklyTrend },
         history, scoreHistory, isTrendEntry, isPrimeSetup, backtest, analysisTimestamp: Date.now()
     };
 };
